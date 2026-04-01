@@ -1,52 +1,48 @@
-"""Core agent loop: calls Claude API, handles streaming + tool use."""
+"""Core agent loop: neutral message format, multi-provider streaming."""
 from __future__ import annotations
 
-from typing import Callable, Optional, Generator
+import uuid
 from dataclasses import dataclass, field
-
-import anthropic
+from typing import Generator
 
 from tools import TOOL_SCHEMAS, execute_tool
+from providers import stream, AssistantTurn, TextChunk, ThinkingChunk, detect_provider
+
+# ── Re-export event types (used by nano_claude.py) ────────────────────────
+__all__ = [
+    "AgentState", "run",
+    "TextChunk", "ThinkingChunk",
+    "ToolStart", "ToolEnd", "TurnDone", "PermissionRequest",
+]
 
 
 @dataclass
 class AgentState:
-    """Mutable session state passed through the agent loop."""
+    """Mutable session state. messages use the neutral provider-independent format."""
     messages: list = field(default_factory=list)
-    total_input_tokens: int = 0
+    total_input_tokens:  int = 0
     total_output_tokens: int = 0
     turn_count: int = 0
 
 
-# ── Event types yielded from run() ────────────────────────────────────────
-
-@dataclass
-class TextChunk:
-    text: str
-
-@dataclass
-class ThinkingChunk:
-    text: str
-
 @dataclass
 class ToolStart:
-    name: str
+    name:   str
     inputs: dict
 
 @dataclass
 class ToolEnd:
-    name: str
-    result: str
+    name:      str
+    result:    str
     permitted: bool = True
 
 @dataclass
 class TurnDone:
-    input_tokens: int
+    input_tokens:  int
     output_tokens: int
 
 @dataclass
 class PermissionRequest:
-    """Yielded when permission is needed. Set .granted before resuming."""
     description: str
     granted: bool = False
 
@@ -60,114 +56,101 @@ def run(
     system_prompt: str,
 ) -> Generator:
     """
-    Generator-based agent loop.
-    Yields events: TextChunk, ThinkingChunk, ToolStart, ToolEnd,
-                   PermissionRequest, TurnDone.
-    The caller drives tool-permission prompts by setting event.granted.
+    Multi-turn agent loop (generator).
+    Yields: TextChunk | ThinkingChunk | ToolStart | ToolEnd |
+            PermissionRequest | TurnDone
     """
-    client = anthropic.Anthropic(api_key=config["api_key"])
-
-    # Append user message
+    # Append user turn in neutral format
     state.messages.append({"role": "user", "content": user_message})
 
     while True:
         state.turn_count += 1
+        assistant_turn: AssistantTurn | None = None
 
-        # ── Build API kwargs ─────────────────────────────────────────────
-        kwargs: dict = {
-            "model":      config["model"],
-            "max_tokens": config["max_tokens"],
-            "system":     system_prompt,
-            "messages":   state.messages,
-            "tools":      TOOL_SCHEMAS,
-        }
-        if config.get("thinking"):
-            kwargs["thinking"] = {
-                "type":         "enabled",
-                "budget_tokens": config.get("thinking_budget", 10000),
-            }
+        # Stream from provider (auto-detected from model name)
+        for event in stream(
+            model=config["model"],
+            system=system_prompt,
+            messages=state.messages,
+            tool_schemas=TOOL_SCHEMAS,
+            config=config,
+        ):
+            if isinstance(event, (TextChunk, ThinkingChunk)):
+                yield event
+            elif isinstance(event, AssistantTurn):
+                assistant_turn = event
 
-        # ── Stream response ──────────────────────────────────────────────
-        in_tokens = out_tokens = 0
-        tool_uses: list = []
-
-        with client.messages.stream(**kwargs) as stream:
-            for event in stream:
-                etype = getattr(event, "type", None)
-
-                if etype == "content_block_delta":
-                    delta = event.delta
-                    dtype = getattr(delta, "type", None)
-                    if dtype == "text_delta":
-                        yield TextChunk(delta.text)
-                    elif dtype == "thinking_delta":
-                        yield ThinkingChunk(delta.thinking)
-
-            final = stream.get_final_message()
-            in_tokens  = final.usage.input_tokens
-            out_tokens = final.usage.output_tokens
-            state.total_input_tokens  += in_tokens
-            state.total_output_tokens += out_tokens
-
-            for block in final.content:
-                if block.type == "tool_use":
-                    tool_uses.append(block)
-
-        # Append assistant turn to history
-        state.messages.append({
-            "role":    "assistant",
-            "content": final.content,
-        })
-
-        yield TurnDone(in_tokens, out_tokens)
-
-        if final.stop_reason != "tool_use" or not tool_uses:
+        if assistant_turn is None:
             break
 
+        # Record assistant turn in neutral format
+        state.messages.append({
+            "role":       "assistant",
+            "content":    assistant_turn.text,
+            "tool_calls": assistant_turn.tool_calls,
+        })
+
+        state.total_input_tokens  += assistant_turn.in_tokens
+        state.total_output_tokens += assistant_turn.out_tokens
+        yield TurnDone(assistant_turn.in_tokens, assistant_turn.out_tokens)
+
+        if not assistant_turn.tool_calls:
+            break   # No tools → conversation turn complete
+
         # ── Execute tools ────────────────────────────────────────────────
-        tool_results = []
-        for tu in tool_uses:
-            yield ToolStart(tu.name, tu.input)
+        for tc in assistant_turn.tool_calls:
+            yield ToolStart(tc["name"], tc["input"])
 
             # Permission gate
-            perm_mode = config.get("permission_mode", "auto")
-            permitted = True
-            if perm_mode != "accept-all":
-                from tools import _is_safe_bash
-                needs_check = (
-                    tu.name in ("Write", "Edit") or
-                    (tu.name == "Bash" and not _is_safe_bash(tu.input.get("command", ""))) or
-                    perm_mode == "manual"
-                )
-                if needs_check:
-                    desc = _permission_desc(tu.name, tu.input)
-                    req = PermissionRequest(description=desc)
-                    yield req
-                    permitted = req.granted
+            permitted = _check_permission(tc, config)
+            if not permitted:
+                req = PermissionRequest(description=_permission_desc(tc))
+                yield req
+                permitted = req.granted
 
             if not permitted:
                 result = "Denied: user rejected this operation"
             else:
                 result = execute_tool(
-                    tu.name, tu.input,
-                    permission_mode="accept-all",  # already checked above
+                    tc["name"], tc["input"],
+                    permission_mode="accept-all",  # already gate-checked above
                 )
 
-            yield ToolEnd(tu.name, result, permitted)
-            tool_results.append({
-                "type":        "tool_result",
-                "tool_use_id": tu.id,
-                "content":     result,
+            yield ToolEnd(tc["name"], result, permitted)
+
+            # Append tool result in neutral format
+            state.messages.append({
+                "role":         "tool",
+                "tool_call_id": tc["id"],
+                "name":         tc["name"],
+                "content":      result,
             })
 
-        state.messages.append({"role": "user", "content": tool_results})
 
+# ── Helpers ───────────────────────────────────────────────────────────────
 
-def _permission_desc(name: str, inputs: dict) -> str:
+def _check_permission(tc: dict, config: dict) -> bool:
+    """Return True if operation is auto-approved (no need to ask user)."""
+    perm_mode = config.get("permission_mode", "auto")
+    if perm_mode == "accept-all":
+        return True
+    if perm_mode == "manual":
+        return False   # always ask
+
+    # "auto" mode: only ask for writes and non-safe bash
+    name = tc["name"]
+    if name in ("Read", "Glob", "Grep", "WebFetch", "WebSearch"):
+        return True
     if name == "Bash":
-        return f"Run: {inputs.get('command', '')}"
-    if name == "Write":
-        return f"Write to: {inputs.get('file_path', '')}"
-    if name == "Edit":
-        return f"Edit: {inputs.get('file_path', '')}"
-    return f"{name}: {list(inputs.values())[:1]}"
+        from tools import _is_safe_bash
+        return _is_safe_bash(tc["input"].get("command", ""))
+    return False   # Write, Edit → ask
+
+
+def _permission_desc(tc: dict) -> str:
+    name = tc["name"]
+    inp  = tc["input"]
+    if name == "Bash":   return f"Run: {inp.get('command', '')}"
+    if name == "Write":  return f"Write to: {inp.get('file_path', '')}"
+    if name == "Edit":   return f"Edit: {inp.get('file_path', '')}"
+    return f"{name}({list(inp.values())[:1]})"

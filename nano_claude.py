@@ -165,13 +165,26 @@ def cmd_clear(_args: str, state, _config) -> bool:
     return True
 
 def cmd_model(args: str, _state, config) -> bool:
-    from config import MODELS
+    from providers import PROVIDERS, detect_provider
     if not args:
-        info(f"Current model: {config['model']}")
-        info("Available models:\n" + "\n".join(f"  {m}" for m in MODELS))
+        model = config["model"]
+        pname = detect_provider(model)
+        info(f"Current model:    {model}  (provider: {pname})")
+        info("\nAvailable models by provider:")
+        for pn, pdata in PROVIDERS.items():
+            ms = pdata.get("models", [])
+            if ms:
+                info(f"  {pn:12s}  " + ", ".join(ms[:4]) + ("..." if len(ms) > 4 else ""))
+        info("\nFormat: 'provider/model' or just model name (auto-detected)")
+        info("  e.g. /model gpt-4o")
+        info("  e.g. /model ollama/qwen2.5-coder")
+        info("  e.g. /model kimi:moonshot-v1-32k")
     else:
-        config["model"] = args.strip()
-        ok(f"Model set to {config['model']}")
+        # Accept both "ollama/model" and "ollama:model" syntax
+        m = args.strip().replace(":", "/", 1)
+        config["model"] = m
+        pname = detect_provider(m)
+        ok(f"Model set to {m}  (provider: {pname})")
         from config import save_config
         save_config(config)
     return True
@@ -406,13 +419,17 @@ def repl(config: dict, initial_prompt: str = None):
 
     # Banner
     if not initial_prompt:
-        model_clr = clr(config["model"], "cyan", "bold")
-        pmode = clr(config.get("permission_mode", "auto"), "yellow")
-        print(clr("╭─ Nano Claude Code ──────────────────────────╮", "dim"))
-        print(clr(f"│  Model: ", "dim") + model_clr)
-        print(clr(f"│  Permissions: ", "dim") + pmode)
-        print(clr("│  Type /help for commands, Ctrl+C to cancel  │", "dim"))
-        print(clr("╰──────────────────────────────────────────────╯", "dim"))
+        from providers import detect_provider
+        model    = config["model"]
+        pname    = detect_provider(model)
+        model_clr = clr(model, "cyan", "bold")
+        prov_clr  = clr(f"({pname})", "dim")
+        pmode     = clr(config.get("permission_mode", "auto"), "yellow")
+        print(clr("╭─ Nano Claude Code ──────────────────────────────╮", "dim"))
+        print(clr("│  Model: ", "dim") + model_clr + " " + prov_clr)
+        print(clr("│  Permissions: ", "dim") + pmode)
+        print(clr("│  /model to switch provider · /help for commands │", "dim"))
+        print(clr("╰──────────────────────────────────────────────────╯", "dim"))
         print()
 
     def run_query(user_input: str):
@@ -523,23 +540,29 @@ def main():
         print(__doc__)
         sys.exit(0)
 
-    from config import load_config, save_config
+    from config import load_config, save_config, has_api_key
+    from providers import detect_provider, PROVIDERS
 
     config = load_config()
 
-    if not config.get("api_key"):
-        err("ANTHROPIC_API_KEY not set. Export it or set it in ~/.nano_claude/config.json")
-        sys.exit(1)
-
-    # Apply CLI overrides
+    # Apply CLI overrides first (so key check uses the right provider)
     if args.model:
-        config["model"] = args.model
+        config["model"] = args.model.replace(":", "/", 1)
     if args.accept_all:
         config["permission_mode"] = "accept-all"
     if args.verbose:
         config["verbose"] = True
     if args.thinking:
         config["thinking"] = True
+
+    # Check API key for active provider (warn only, don't block local providers)
+    if not has_api_key(config):
+        pname = detect_provider(config["model"])
+        prov  = PROVIDERS.get(pname, {})
+        env   = prov.get("api_key_env", "")
+        if env:   # local providers like ollama have no env key requirement
+            warn(f"No API key found for provider '{pname}'. "
+                 f"Set {env} or run: /config {pname}_api_key=YOUR_KEY")
 
     initial = " ".join(args.prompt) if args.prompt else None
     if args.print_mode and not initial:
