@@ -24,6 +24,7 @@
 ---
 
 ## 🔥🔥🔥 News (Pacific Time)
+- 10:00 AM, Apr 03, 2026: **v3.01** — MCP (Model Context Protocol) support: `mcp/` package, stdio + SSE + HTTP transports, auto tool discovery, `/mcp` command, 34 new tests (**~7000** lines of Python).
 - 12:20 PM, Apr 02, 2026: **v3.0** — Multi-agent packages (`multi_agent/`), memory package (`memory/`), skill package (`skill/`) with built-in skills, argument substitution, fork/inline execution, AI memory search, git worktree isolation, agent type definitions (**~5000** lines of Python), see [update](https://github.com/SafeRL-Lab/nano-claude-code/blob/main/Update_README.MD).
 - 10:00 AM, Apr 02, 2026: **v2.0** — Context compression, memory, sub-agents, skills, diff view, tool plugin system (**~3400** lines of Python Code).
 - 01:47 PM, Apr 01, 2026: Support VLLM inference (**~2000** lines of Python Code).
@@ -54,6 +55,7 @@ A minimal Python implementation of Claude Code in ~900 lines (Initial version), 
   * [Memory](#memory)
   * [Skills](#skills)
   * [Sub-Agents](#sub-agents)
+  * [MCP (Model Context Protocol)](#mcp-model-context-protocol)
   * [Context Compression](#context-compression)
   * [Diff View](#diff-view)
   * [CLAUDE.md Support](#claudemd-support)
@@ -71,7 +73,8 @@ A minimal Python implementation of Claude Code in ~900 lines (Initial version), 
 | Multi-provider | Anthropic · OpenAI · Gemini · Kimi · Qwen · Zhipu · DeepSeek · Ollama · LM Studio · Custom endpoint |
 | Interactive REPL | readline history, Tab-complete slash commands |
 | Agent loop | Streaming API + automatic tool-use loop |
-| 18 built-in tools | Read · Write · Edit · Bash · Glob · Grep · WebFetch · WebSearch · MemorySave · MemoryDelete · MemorySearch · MemoryList · Agent · SendMessage · CheckAgentResult · ListAgentTasks · ListAgentTypes · Skill · SkillList |
+| 20 built-in tools | Read · Write · Edit · Bash · Glob · Grep · WebFetch · WebSearch · MemorySave · MemoryDelete · MemorySearch · MemoryList · Agent · SendMessage · CheckAgentResult · ListAgentTasks · ListAgentTypes · Skill · SkillList · *(MCP tools auto-added at startup)* |
+| MCP integration | Connect any MCP server (stdio/SSE/HTTP), tools auto-registered and callable by Claude |
 | Diff view | Git-style red/green diff display for Edit and Write |
 | Context compression | Auto-compact long conversations to stay within model limits |
 | Persistent memory | Dual-scope memory (user + project) with 4 types, AI search, staleness warnings |
@@ -489,6 +492,11 @@ Type `/` and press **Tab** to autocomplete.
 | `/memory <query>` | Search memories by keyword |
 | `/skills` | List available skills |
 | `/agents` | Show sub-agent task status |
+| `/mcp` | List configured MCP servers and their tools |
+| `/mcp reload` | Reconnect all MCP servers and refresh tools |
+| `/mcp reload <name>` | Reconnect a single MCP server |
+| `/mcp add <name> <cmd> [args]` | Add a stdio MCP server to user config |
+| `/mcp remove <name>` | Remove a server from user config |
 | `/exit` / `/quit` | Exit |
 
 **Switching models inside a session:**
@@ -622,6 +630,16 @@ Keys are saved to `~/.nano_claude/config.json` and loaded automatically on next 
 |---|---|---|
 | `Skill` | Invoke a skill by name from within the conversation | `name`, `args` |
 | `SkillList` | List all available skills with triggers and metadata | — |
+
+### MCP Tools
+
+MCP tools are discovered automatically from configured servers and registered under the name `mcp__<server>__<tool>`. Claude can use them exactly like built-in tools.
+
+| Example tool name | Where it comes from |
+|---|---|
+| `mcp__git__git_status` | `git` server, `git_status` tool |
+| `mcp__filesystem__read_file` | `filesystem` server, `read_file` tool |
+| `mcp__myserver__my_action` | custom server you configured |
 
 > **Adding custom tools:** See [Architecture Guide](docs/architecture.md#tool-registry) for how to register your own tools.
 
@@ -794,6 +812,98 @@ Sub-agents have independent conversation history, share the file system, and are
 
 ---
 
+## MCP (Model Context Protocol)
+
+MCP lets you connect any external tool server — local subprocess or remote HTTP — and Claude can use its tools automatically. This is the same protocol Claude Code uses to extend its capabilities.
+
+### Supported transports
+
+| Transport | Config `type` | Description |
+|---|---|---|
+| **stdio** | `"stdio"` | Spawn a local subprocess (most common) |
+| **SSE** | `"sse"` | HTTP Server-Sent Events stream |
+| **HTTP** | `"http"` | Streamable HTTP POST (newer servers) |
+
+### Configuration
+
+Place a `.mcp.json` file in your project directory **or** edit `~/.nano_claude/mcp.json` for user-wide servers.
+
+```json
+{
+  "mcpServers": {
+    "git": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-git"]
+    },
+    "filesystem": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-filesystem", "/tmp"]
+    },
+    "my-remote": {
+      "type": "sse",
+      "url": "http://localhost:8080/sse",
+      "headers": {"Authorization": "Bearer my-token"}
+    }
+  }
+}
+```
+
+Config priority: `.mcp.json` (project) overrides `~/.nano_claude/mcp.json` (user) by server name.
+
+### Quick start
+
+```bash
+# Install a popular MCP server
+pip install uv        # uv includes uvx
+uvx mcp-server-git --help   # verify it works
+
+# Add to user config via REPL
+/mcp add git uvx mcp-server-git
+
+# Or create .mcp.json in your project dir, then:
+/mcp reload
+```
+
+### REPL commands
+
+```
+/mcp                          # list servers + their tools + connection status
+/mcp reload                   # reconnect all servers, refresh tool list
+/mcp reload git               # reconnect a single server
+/mcp add myserver uvx mcp-server-x   # add stdio server
+/mcp remove myserver          # remove from user config
+```
+
+### How Claude uses MCP tools
+
+Once connected, Claude can call MCP tools directly:
+
+```
+You: What files changed in the last git commit?
+AI: [calls mcp__git__git_diff_staged()]
+    → shows diff output from the git MCP server
+```
+
+Tool names follow the pattern `mcp__<server_name>__<tool_name>`. All characters
+that are not alphanumeric or `_` are automatically replaced with `_`.
+
+### Popular MCP servers
+
+| Server | Install | Provides |
+|---|---|---|
+| `mcp-server-git` | `uvx mcp-server-git` | git operations (status, diff, log, commit) |
+| `mcp-server-filesystem` | `uvx mcp-server-filesystem <path>` | file read/write/list |
+| `mcp-server-fetch` | `uvx mcp-server-fetch` | HTTP fetch tool |
+| `mcp-server-postgres` | `uvx mcp-server-postgres <conn-str>` | PostgreSQL queries |
+| `mcp-server-sqlite` | `uvx mcp-server-sqlite --db-path x.db` | SQLite queries |
+| `mcp-server-brave-search` | `uvx mcp-server-brave-search` | Brave web search |
+
+> Browse the full registry at [modelcontextprotocol.io/servers](https://modelcontextprotocol.io/servers)
+
+---
+
 ## Context Compression
 
 Long conversations are automatically compressed to stay within the model's context window.
@@ -910,7 +1020,15 @@ nano_claude_code/
 │   └── tools.py          # Skill, SkillList
 ├── skills.py             # Backward-compat shim → skill/
 │
-└── tests/                # 101 unit tests
+├── mcp/                  # MCP (Model Context Protocol) package
+│   ├── __init__.py       # Re-exports
+│   ├── types.py          # MCPServerConfig, MCPTool, MCPServerState, JSON-RPC helpers
+│   ├── client.py         # StdioTransport, HttpTransport, MCPClient, MCPManager
+│   ├── config.py         # Load .mcp.json (project) + ~/.nano_claude/mcp.json (user)
+│   └── tools.py          # Auto-discover + register MCP tools into tool_registry
+│
+└── tests/                # 135 unit tests
+    ├── test_mcp.py
     ├── test_memory.py
     ├── test_skills.py
     ├── test_subagent.py
@@ -919,11 +1037,71 @@ nano_claude_code/
     └── test_diff_view.py
 ```
 
-> **For developers:** Each feature package (`multi_agent/`, `memory/`, `skill/`) is self-contained. Add custom tools by calling `register_tool(ToolDef(...))` from any module imported by `tools.py`.
+> **For developers:** Each feature package (`multi_agent/`, `memory/`, `skill/`, `mcp/`) is self-contained. Add custom tools by calling `register_tool(ToolDef(...))` from any module imported by `tools.py`.
 
 ---
 
 ## FAQ
+
+**Q: How do I add an MCP server?**
+
+Option 1 — via REPL (stdio server):
+```
+/mcp add git uvx mcp-server-git
+```
+
+Option 2 — create `.mcp.json` in your project:
+```json
+{
+  "mcpServers": {
+    "git": {"type": "stdio", "command": "uvx", "args": ["mcp-server-git"]}
+  }
+}
+```
+
+Then run `/mcp reload` or restart. Use `/mcp` to check connection status.
+
+**Q: An MCP server is showing an error. How do I debug it?**
+
+```
+/mcp                    # shows error message per server
+/mcp reload git         # try reconnecting
+```
+
+If the server uses stdio, make sure the command is in your `$PATH`:
+```bash
+which uvx               # should print a path
+uvx mcp-server-git      # run manually to see errors
+```
+
+**Q: Can I use MCP servers that require authentication?**
+
+For HTTP/SSE servers with a Bearer token:
+```json
+{
+  "mcpServers": {
+    "my-api": {
+      "type": "sse",
+      "url": "https://myserver.example.com/sse",
+      "headers": {"Authorization": "Bearer sk-my-token"}
+    }
+  }
+}
+```
+
+For stdio servers with env-based auth:
+```json
+{
+  "mcpServers": {
+    "brave": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-brave-search"],
+      "env": {"BRAVE_API_KEY": "your-key"}
+    }
+  }
+}
+```
 
 **Q: Tool calls don't work with my local Ollama model.**
 

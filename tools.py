@@ -465,3 +465,9 @@ from multi_agent.tools import get_agent_manager as _get_agent_manager  # noqa: F
 # ── Skill tools (Skill, SkillList) ────────────────────────────────────────
 # Defined in skill/tools.py; importing registers them automatically.
 import skill.tools as _skill_tools  # noqa: F401
+
+
+# ── MCP tools ─────────────────────────────────────────────────────────────────
+# mcp/tools.py connects to configured MCP servers and registers their tools.
+# Connection happens in a background thread so startup is not blocked.
+import mcp.tools as _mcp_tools  # noqa: F401
