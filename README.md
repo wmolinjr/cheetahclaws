@@ -27,6 +27,7 @@
 ---
 
 ## 🔥🔥🔥 News (Pacific Time)
+- 04:00 PM, Apr 03, 2026: **v3.03** — Task management system (`task/` package): `TaskCreate` / `TaskUpdate` / `TaskGet` / `TaskList` tools with sequential IDs, dependency edges (blocks/blocked_by), metadata, persistence to `.nano_claude/tasks.json`, thread-safe store, `/tasks` REPL command, 37 new tests (**~9500** lines of Python).
 - 02:50 PM, Apr 03, 2026: **v3.02** — Plugin system (`plugin/` package): install/uninstall/enable/disable/update via `/plugin` CLI, recommendation engine (keyword+tag matching), multi-scope (user/project), git-based marketplace. `AskUserQuestion` tool: interactive mid-task user prompts with numbered options and free-text input (**~8500** lines of Python).
 - 10:00 AM, Apr 03, 2026: **v3.01** — MCP (Model Context Protocol) support: `mcp/` package, stdio + SSE + HTTP transports, auto tool discovery, `/mcp` command, 34 new tests (**~7000** lines of Python).
 - 12:20 PM, Apr 02, 2026: **v3.0** — Multi-agent packages (`multi_agent/`), memory package (`memory/`), skill package (`skill/`) with built-in skills, argument substitution, fork/inline execution, AI memory search, git worktree isolation, agent type definitions (**~5000** lines of Python), see [update](https://github.com/SafeRL-Lab/nano-claude-code/blob/main/docs/update_readme_v3.0.md).
@@ -62,6 +63,7 @@ A minimal Python Implementation of Claude Code in ~900 lines (Initial version), 
   * [MCP (Model Context Protocol)](#mcp-model-context-protocol)
   * [Plugin System](#plugin-system)
   * [AskUserQuestion Tool](#askuserquestion-tool)
+  * [Task Management](#task-management)
   * [Context Compression](#context-compression)
   * [Diff View](#diff-view)
   * [CLAUDE.md Support](#claudemd-support)
@@ -83,6 +85,7 @@ A minimal Python Implementation of Claude Code in ~900 lines (Initial version), 
 | MCP integration | Connect any MCP server (stdio/SSE/HTTP), tools auto-registered and callable by Claude |
 | Plugin system | Install/uninstall/enable/disable/update plugins from git URLs or local paths; multi-scope (user/project); recommendation engine |
 | AskUserQuestion | Claude can pause and ask the user a clarifying question mid-task, with optional numbered choices |
+| Task management | TaskCreate/Update/Get/List tools; sequential IDs; dependency edges; metadata; persisted to `.nano_claude/tasks.json`; `/tasks` REPL command |
 | Diff view | Git-style red/green diff display for Edit and Write |
 | Context compression | Auto-compact long conversations to stay within model limits |
 | Persistent memory | Dual-scope memory (user + project) with 4 types, AI search, staleness warnings |
@@ -1005,6 +1008,69 @@ Your choice (number or text):
 - Select by number or type free text directly
 - Claude receives your answer and continues the task
 - 5-minute timeout (returns "(no answer — timeout)" if unanswered)
+
+---
+
+## Task Management
+
+The `task/` package gives Claude (and you) a structured task list for tracking multi-step work within a session.
+
+### Tools available to Claude
+
+| Tool | Parameters | What it does |
+|------|-----------|--------------|
+| `TaskCreate` | `subject`, `description`, `active_form?`, `metadata?` | Create a task; returns `#id created: subject` |
+| `TaskUpdate` | `task_id`, `subject?`, `description?`, `status?`, `owner?`, `add_blocks?`, `add_blocked_by?`, `metadata?` | Update any field; `status='deleted'` removes the task |
+| `TaskGet` | `task_id` | Return full details of one task |
+| `TaskList` | _(none)_ | List all tasks with status icons and pending blockers |
+
+**Valid statuses:** `pending` → `in_progress` → `completed` / `cancelled` / `deleted`
+
+### Dependency edges
+
+```
+TaskUpdate(task_id="3", add_blocked_by=["1","2"])
+# Task 3 is now blocked by tasks 1 and 2.
+# Reverse edges are set automatically: tasks 1 and 2 get task 3 in their "blocks" list.
+```
+
+Completed tasks are treated as resolved — `TaskList` hides their blocking effect on dependents.
+
+### Persistence
+
+Tasks are saved to `.nano_claude/tasks.json` in the current working directory after every mutation and reloaded on first access.
+
+### REPL commands
+
+```
+/tasks                    list all tasks
+/tasks create <subject>   quick-create a task
+/tasks start <id>         mark in_progress
+/tasks done <id>          mark completed
+/tasks cancel <id>        mark cancelled
+/tasks delete <id>        remove a task
+/tasks get <id>           show full details
+/tasks clear              delete all tasks
+```
+
+### Typical Claude workflow
+
+```
+User: implement the login feature
+
+Claude:
+  TaskCreate(subject="Design auth schema", description="JWT vs session")  → #1
+  TaskCreate(subject="Write login endpoint", description="POST /auth/login") → #2
+  TaskCreate(subject="Write tests", description="Unit + integration") → #3
+  TaskUpdate(task_id="2", add_blocked_by=["1"])
+  TaskUpdate(task_id="3", add_blocked_by=["2"])
+
+  TaskUpdate(task_id="1", status="in_progress", active_form="Designing schema")
+  ... (does the work) ...
+  TaskUpdate(task_id="1", status="completed")
+  TaskList()  → task 2 is now unblocked
+  ...
+```
 
 ---
 

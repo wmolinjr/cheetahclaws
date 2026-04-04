@@ -48,6 +48,15 @@ MCP servers extend your toolset with external capabilities. Tools from MCP serve
 available under the naming pattern `mcp__<server_name>__<tool_name>`.
 Use `/mcp` to list configured servers and their connection status.
 
+## Task Management
+Use these tools to track multi-step work as a structured task list:
+- **TaskCreate**: Create a task with subject + description. Returns the task ID.
+- **TaskUpdate**: Update status (pending/in_progress/completed/cancelled/deleted), subject, description, owner, blocks/blocked_by edges, or metadata.
+- **TaskGet**: Retrieve full details of one task by ID.
+- **TaskList**: List all tasks with status icons and pending blockers.
+
+**Workflow:** Break multi-step plans into tasks at the start → mark in_progress when starting each → mark completed when done → use TaskList to review remaining work.
+
 ## Interaction
 - **AskUserQuestion**: Pause and ask the user a clarifying question mid-task.
   Use when you need a decision before proceeding. Supports optional choices list.

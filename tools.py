@@ -131,6 +131,68 @@ TOOL_SCHEMAS = [
             "required": ["query"],
         },
     },
+    # ── Task tools (schemas also listed here for Claude's tool list) ──────────
+    {
+        "name": "TaskCreate",
+        "description": (
+            "Create a new task in the task list. "
+            "Use this to track work items, to-dos, and multi-step plans."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "subject":     {"type": "string", "description": "Brief title"},
+                "description": {"type": "string", "description": "What needs to be done"},
+                "active_form": {"type": "string", "description": "Present-continuous label while in_progress"},
+                "metadata":    {"type": "object", "description": "Arbitrary metadata"},
+            },
+            "required": ["subject", "description"],
+        },
+    },
+    {
+        "name": "TaskUpdate",
+        "description": (
+            "Update a task: change status, subject, description, owner, "
+            "dependency edges, or metadata. "
+            "Set status='deleted' to remove. "
+            "Statuses: pending, in_progress, completed, cancelled, deleted."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id":       {"type": "string"},
+                "subject":       {"type": "string"},
+                "description":   {"type": "string"},
+                "status":        {"type": "string", "enum": ["pending","in_progress","completed","cancelled","deleted"]},
+                "active_form":   {"type": "string"},
+                "owner":         {"type": "string"},
+                "add_blocks":    {"type": "array", "items": {"type": "string"}},
+                "add_blocked_by":{"type": "array", "items": {"type": "string"}},
+                "metadata":      {"type": "object"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "TaskGet",
+        "description": "Retrieve full details of a single task by ID.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Task ID to retrieve"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "TaskList",
+        "description": "List all tasks with their status, owner, and pending blockers.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
     {
         "name": "AskUserQuestion",
         "description": (
@@ -636,3 +698,8 @@ try:
     _reg_plugin_tools()
 except Exception as _plugin_err:
     pass  # Plugin loading is best-effort; never crash startup
+
+
+# ── Task tools (TaskCreate, TaskUpdate, TaskGet, TaskList) ─────────────────────
+# task/tools.py registers all four tools into the central registry on import.
+import task.tools as _task_tools  # noqa: F401
