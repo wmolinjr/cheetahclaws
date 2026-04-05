@@ -408,10 +408,9 @@ def stream_openai_compat(
         "stream":   True,
     }
 
-    # Pass num_ctx for local Ollama/LM Studio endpoints so conversation history isn't truncated
-    # Only apply based on base_url (not model name) — gemma/llama/etc. may be served by non-Ollama APIs
-    _is_local_ollama = "11434" in base_url or "localhost" in base_url or "127.0.0.1" in base_url
-    _is_lmstudio = "lmstudio" in base_url or "1234" in base_url
+    # Pass num_ctx for known Ollama/LM Studio ports only — avoids matching other local servers (e.g. vLLM on :8000)
+    _is_local_ollama = "11434" in base_url
+    _is_lmstudio     = "1234" in base_url and ("lmstudio" in base_url or "localhost" in base_url or "127.0.0.1" in base_url)
     if _is_local_ollama or _is_lmstudio:
         prov = detect_provider(model)
         ctx_limit = PROVIDERS.get(prov if prov in ("ollama", "lmstudio") else "ollama", {}).get("context_limit", 128000)
